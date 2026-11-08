@@ -110,28 +110,33 @@
 (defun accept-client (listener)
   #+ccl
   (ccl:accept-connection listener)
-  #+sbcl
+  #+(and sbcl (not win32))
   (let ((client (sb-bsd-sockets:socket-accept listener)))
     (sb-bsd-sockets:socket-make-stream client
                                        :input t :output t
                                        :element-type 'character
                                        :external-format :utf-8
                                        :auto-close t
-                                       :buffering :full)))
+                                       :buffering :full))
+  #+(and sbcl win32)
+  (error "accept-client: unix sockets are not available on Windows"))
 
 (defun make-test-listener (path)
   (ignore-errors (delete-file path))
   #+ccl
   (ccl:make-socket :address-family :file :connect :passive :local-filename path)
-  #+sbcl
+  #+(and sbcl (not win32))
   (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
     (sb-bsd-sockets:socket-bind sock path)
     (sb-bsd-sockets:socket-listen sock 16)
-    sock))
+    sock)
+  #+(and sbcl win32)
+  (error "make-test-listener: unix sockets are not available on Windows"))
 
 (defun close-listener (listener)
   #+ccl (ignore-errors (close listener))
-  #+sbcl (ignore-errors (sb-bsd-sockets:socket-close listener)))
+  #+(and sbcl (not win32)) (ignore-errors (sb-bsd-sockets:socket-close listener))
+  #+(and sbcl win32) (declare (ignore listener)))
 
 (defun serve-peer (stream)
   (unwind-protect
@@ -149,7 +154,7 @@
     (ignore-errors (close stream))))
 
 (test socket-reconnect-and-close
-  #+(or ccl sbcl)
+  #+(or ccl (and sbcl (not win32)))
   (let* ((path (test-socket-path))
          (listener (make-test-listener path))
          (accept (bordeaux-threads:make-thread
@@ -179,8 +184,8 @@
       (ignore-errors (close-listener listener))
       (ignore-errors (bordeaux-threads:destroy-thread accept))
       (ignore-errors (delete-file path))))
-  #-(or ccl sbcl)
-  (skip "unix sockets are implemented for CCL and SBCL"))
+  #-(or ccl (and sbcl (not win32)))
+  (skip "unix sockets are implemented for CCL, and SBCL on non-Windows"))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Typed results: every RPC wrapper returns an instance of the schema class
@@ -250,7 +255,8 @@
                  (wait-result-from (first (wait-result-children
                                            (run-result-wait r))))))
     ;; rm/keep collide with the terminal.rm / terminal.keep RPC wrappers on
-    ;; class terminal; on run-result they keep their plain names (both NIL here).
+    ;; class terminal; on run-result they keep their plain names (both
+    ;; NIL here).
     (is (null (run-result-rm r)))
     (is (eq t (run-result-keep r)))
     (is (null (run-result-exit-code r))))
@@ -289,7 +295,8 @@
     (is (null (machine-name r)))
     (is (null (machine-target r))))
 
-  ;; wire keys with underscores come from Lisp dashes (created-ms -> created_ms).
+  ;; wire keys with underscores come from Lisp dashes
+  ;; (created-ms -> created_ms).
   (let* ((r (jval->run-result (obj "created_ms" 5 "paste_gap_ms" 20))))
     (is (eql 5 (run-result-created-ms r)))
     (is (eql 20 (run-result-paste-gap-ms r))))

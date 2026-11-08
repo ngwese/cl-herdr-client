@@ -8,7 +8,8 @@
 ;;;; handling, and an events subscription.
 ;;;;
 ;;;; Run:  ccl --batch --load demo.lisp
-;;;;       sbcl --noinform --disable-debugger --load demo.lisp --eval '(sb-ext:quit)'
+;;;;       sbcl --noinform --disable-debugger --load demo.lisp
+;;;;            --eval '(sb-ext:quit)'
 ;;;; (loads cl-herdr-client from the directory this file lives in, and Quicklisp
 ;;;; from ~/quicklisp/setup.lisp when it is not already loaded)
 
@@ -42,8 +43,13 @@
                      (status-result-live st)))
 
            (format t "[3] terminal.run a background echo...~%")
-           (let* ((run (terminal-run conn :name "demo-echo"
-                                     :line "echo hello-from-cl-herdr-client; sleep 1"
+           ;; NB: herdr-core runs commands through the platform shell, so the
+           ;; demo stays within the dialects understood on each host (cmd on
+           ;; Windows, sh elsewhere).
+           (let* ((line #-win32 "echo hello-from-cl-herdr-client; sleep 1"
+                         #+win32 "echo hello-from-cl-herdr-client & timeout /t 1 /nobreak >nul")
+                  (run (terminal-run conn :name "demo-echo"
+                                     :line line
                                      :no-notify t))
                   (addr (run-result-address run)))
              (format t "    started: ~a~%" addr)
@@ -103,9 +109,14 @@
              (terminal-rm conn ev-addr)
              (format t "    (subscription closed; terminal removed)~%"))
 
-           (format t "[8] terminal.send into a cat, read it back, kill it...~%")
+           (format t "[8] terminal.send into a reader, read it back, kill it...~%")
+           ;; `cat` has no Windows equivalent in cmd; `more` reads stdin and
+           ;; echoes it, staying alive until killed — the same behavior the
+           ;; step needs on both platforms.
            (let* ((addr (run-result-address
-                         (terminal-run conn :name "demo-cat" :line "cat"
+                         (terminal-run conn :name "demo-cat"
+                                       :line #-win32 "cat"
+                                             #+win32 "more"
                                        :no-notify t))))
              (terminal-send conn addr "hi-from-client")
              ;; cat keeps running and never reports status, so a plain wait is
