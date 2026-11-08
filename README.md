@@ -1,0 +1,259 @@
+# cl-herdr-client
+
+A Common Lisp client for the **herdr-core** daemon (`hc`).
+
+herdr-core is the always-running daemon that supervises terminals, machines,
+files and documents from the herdr project. It speaks **JSON-RPC 2.0**, one
+JSON message per line, over a **unix-domain socket**. The method set is
+discovered from `hc schema` and each method gets a thin, ergonomic Lisp
+wrapper.
+
+- Targets: **Clozure Common Lisp** (CCL) and **SBCL**. Unix-domain sockets
+  use CCL's native `:address-family :file` support, or SBCL's `sb-bsd-sockets`.
+- Dependencies (all from Quicklisp): `jsown`, `bordeaux-threads`,
+  `cl-base64`, `alexandria`, `uiop`.
+- Results are **jsown objects**; please read up on the
+  [jsown](http://quickdocs.org/jsown/) conventions (objects are cons cells
+  whose `cdr` is a list of alternating keys and values).
+- The only external dependency on the daemon is the socket — the tests are
+  otherwise self-contained.
+
+---
+
+## Loading
+
+```lisp
+;; with the repo in your asdf central registry / local-projects:
+(ql:quickload :cl-herdr-client)      ; or (asdf:load-system :cl-herdr-client)
+```
+
+`cl-herdr-client` has a nickname **`hc`**; `(in-package :cl-herdr-client)` or use
+the `hc:` prefix.
+
+---
+
+## Quick start
+
+```lisp
+(in-package :cl-herdr-client)
+
+(connect)                          ; default socket, does the hello handshake
+;; => <herdr-connection>, plus a second value: the hello result object
+
+(let ((run (terminal-run conn :name "echo" :line "echo hi there")))
+  (format t "~a~%" (jval run "address")))       ; e.g. "t1x"
+
+(terminal-wait conn :terminal "t1x" :timeout 10)
+(terminal-read conn "t1x" :lines 40)
+(terminal-rm conn "t1x")
+
+(disconnect conn)
+```
+
+---
+
+## Connections
+
+```lisp
+(connect &key (path (default-socket-path)) caller-name (generation 1))
+```
+
+- Opens the unix socket and performs the `hello` handshake. The default path
+  is `$XDG_RUNTIME_DIR/herdr-core/default.sock` (override with `:path`).
+- `(connection-hello conn)` returns the hello result.
+- `(disconnect conn)` closes the socket and fails any in-flight requests.
+- `(connected-p conn)` — is the socket open and its reader thread alive?
+- `default-socket-path` / `*default-socket-path*` — inspect or rebind.
+
+Each connection runs a **background reader thread** that reads lines off the
+socket, correlates responses to in-flight requests by `id`, and parks
+asynchronous notifications in a thread-safe FIFO mailbox. Your calling thread
+is never on the socket's read path.
+
+---
+
+## Talking JSON
+
+Functions whose params are JSON objects accept a **jsown object** or a plain
+**alist**. The helpers:
+
+| Helper | Purpose |
+|---|---|
+| `(obj "a" 1 "b" "two")` | build an object, **dropping NIL values** (default for RPC params — pass only what you mean) |
+| `(object "a" 1 "b" nil)` | build an object, **keeping NIL values as JSON `null`** |
+| `(alist->js '(("a" . 1)))` / `(plist->js '("a" 1))` | build from existing data |
+| `(jval o "key")` | value of a key (`jsown:val`) |
+| `(jval-safe o "key")` | same, or NIL when absent |
+| `(jto-json o)` | serialize an object to text |
+| `(jparse text)` | parse JSON text into an object |
+| `(js-alist o)` | object → alist |
+| `(base64-encode data)` / `(base64-decode text)` | base64, as the daemon wants for `file.write`, `machine.exec` input and `terminal.put` (string → UTF-8 bytes, or pass an `(unsigned-byte 8)` vector) |
+
+Gotcha: jsown represents JSON `null` as the keyword `:null`. A raw CL `NIL`
+serializes as `[]` (an empty array), which is why `object` turns NIL into
+`:null` and `obj` skips NIL keys entirely.
+
+---
+
+## Calling methods
+
+Use the generated wrappers — one per OpenRPC method — or the raw transport
+when you need to:
+
+```lisp
+;; wrapper: (name conn required-args... &key optional-args...)
+(terminal-run conn :name "t" :line "sleep 5")
+(terminal-send conn "t1x" "ls -la" :timeout 5)
+(doc-set conn :name "my-doc" :value (object "count" 1) :version 3)
+
+;; raw transport
+(call conn "terminal.run" (obj "name" "t" "line" "sleep 5") :timeout 30)
+(notify conn "something.event")          ; no reply expected
+
+(method-info 'terminal-run)     ; => wire name, required args, optional args
+```
+
+Design notes:
+
+- The connection is always the **first argument**.
+- **Required** params are positional; **optional** params are keywords, all
+  defaulting to NIL, and NIL-valued ones are omitted from the request.
+- Wire keys use underscores where Lisp uses dashes; the wrappers translate
+  (e.g. `:no-notify` → `"no_notify"`, `:outlive-parent` → `"outlive_parent"`).
+- Return values are jsown objects. Optional `on` params let the daemon send a
+  notification on an event connection instead of a live reply.
+- `*call-timeout*` defaults to 300 s (per-call `:timeout` overrides).
+
+### Full API reference (`hc:`/`cl-herdr-client:`)
+
+| Function | JSON-RPC method |
+|---|---|
+| `hello` | `hello` |
+| `server-status` `server-stop` `server-restart` `rpc-discover` | `server.*`, `rpc.discover` |
+| `template-list` | `templates.list` |
+| `terminal-list` `terminal-get` `terminal-run` `terminal-kill` `terminal-rm` `terminal-keep` `terminal-label` | `terminal.*` |
+| `terminal-read` `terminal-send` `terminal-wait` `terminal-keys` `terminal-interrupt` `terminal-put` | `terminal.*` |
+| `machine-exec` | `machine.exec` |
+| `file-read` `file-write` `file-edit` | `file.*` |
+| `doc-get` `doc-set` | `doc.*` |
+| `machine-add` `machine-list` `machine-connect` `machine-rename` `machine-rm` | `machine.*` |
+| `events-subscribe` | `events.subscribe` |
+
+`(method-info 'terminal-run)` returns the wire name plus required/optional arg
+lists for any of the above.
+
+---
+
+## Errors
+
+Conditions (all subclass `herdr-error`):
+
+| Condition | Raised when |
+|---|---|
+| `herdr-rpc-error` | the daemon replies with a JSON-RPC `error` object |
+| `herdr-connection-error` | socket/stream problems, closed connection, handshake failure |
+| `herdr-timeout` | no response within the `:timeout`/`*call-timeout*` window |
+
+Accessors: `herdr-error-message`, `herdr-rpc-error-code`, `herdr-rpc-error-kind`
+(the daemon's `error.data.kind`, e.g. `not_found`).
+
+---
+
+## Asynchronous events (notifications)
+
+**Protocol fact:** in the plain, unframed protocol the daemon uses, once you
+call `events.subscribe` on a connection, *that connection now carries only
+notifications and stops answering requests*. `cl-herdr-client` therefore does the
+right thing for you:
+
+> `subscribe` always opens its **own dedicated connection**. The
+> request/response connection you normally use is never polluted.
+
+```lisp
+(let ((sub (subscribe :terminal "t1x")))       ; opens a dedicated connection
+  (sub-seq sub)                                ; initial `seq` from the daemon
+  ;; poll for notifications:
+  (next-event (sub-connection sub) :timeout 2)
+  ;;  → next event object, or NIL after 2 s
+  (drain-events (sub-connection sub))          ; non-blocking: everything queued
+  (close-event-subscription sub))              ; daemon has no unsubscribe;
+;;                                              closing the connection ends it
+```
+
+- `subscribe &key path terminal children-of labels` → an `event-subscription`.
+- `(pending-events-p conn)` — anything already in a connection's mailbox?
+- `(start-event-loop on-event &key ...)` — subscribe and run `on-event` (a
+  function of one argument, the event object) on a background thread until
+  `close-event-subscription`.
+
+Events are jsown objects like
+`{"jsonrpc" "2.0", "method" "event", "params" {...}}`; the terminal address is
+at `(jval (jval-safe e "params") "terminal")` and the type at
+`(jval-safe (jval-safe e "params") "type")` (e.g. `started`, `output`, `exit`,
+`removed`).
+
+---
+
+## Concurrency notes
+
+- **Reader thread per connection**, named `cl-herdr-client-reader`; responses are
+  matched by JSON-RPC `id`, notifications go to the mailbox. Lock usage is
+  minimal and there are no shared mutable globals.
+- `disconnect` shuts down the read side of the socket and **joins the reader
+  before the descriptor is closed**. On Clozure, closing the fd while that
+  thread is still blocked in `read-line` lets the kernel reuse the number for
+  the next `connect`, and the stale reader consumes the new connection's
+  reply. Joining first closes that window on both CCL and SBCL.
+- Deadlines, not `condition-wait` return values: bordeaux-threads **0.9.4's**
+  CCL backend makes `condition-wait` return `T` even on timeout. `call` and
+  `next-event` therefore keep an absolute internal deadline and re-check
+  completion, so `herdr-timeout` fires when it should. The same wait is a
+  native condition variable on SBCL.
+
+---
+
+## Tests (`cl-herdr-client/tests`)
+
+Structured with the **FiveAM** framework; no daemon needed.
+
+```sh
+ccl --batch --load ~/quicklisp/setup.lisp \
+    --eval '(push #p"/path/to/this/repo/" asdf:*central-registry*)' \
+    --eval '(asdf:test-system :cl-herdr-client)' \
+    --eval '(ccl:quit)'
+
+sbcl --noinform --disable-debugger --load ~/quicklisp/setup.lisp \
+    --eval '(push #p"/path/to/this/repo/" asdf:*central-registry*)' \
+    --eval '(asdf:test-system :cl-herdr-client)' \
+    --eval '(sb-ext:quit)'
+```
+
+Current suites: `json-object-builders`, `json-round-trip`, `base64`,
+`api-metadata`, `socket-reconnect-and-close` (30 reconnects, then a call on one connection
+after another is closed). Status: **90 checks, 100% pass** on CCL and SBCL.
+
+## Demo
+
+`demo.lisp` is an end-to-end smoke test against a **live** daemon: hello,
+server status, terminal run/wait/read/rm, an error round-trip, file
+write/read, doc get/set, an events subscription, and a `terminal.send`-into-`cat`
+exchange.
+
+```sh
+ccl --batch --load demo.lisp
+sbcl --noinform --disable-debugger --load demo.lisp --eval '(sb-ext:quit)'
+```
+
+---
+
+## File layout
+
+```
+cl-herdr-client.asd        ASDF system + cl-herdr-client/tests test system
+src/packages.lisp       package + exports
+src/transport.lisp      socket, reader thread, JSON helpers, call/notify, conditions
+src/api.lisp            one wrapper per OpenRPC method (+ method-info)
+src/events.lisp         dedicated-connection event subscriptions
+tests/tests.lisp        FiveAM suite
+demo.lisp               live-daemon smoke test
+```
