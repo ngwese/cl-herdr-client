@@ -181,8 +181,9 @@ the connection and the hello result object."
                           :name "cl-herdr-client-reader"))
     (handler-case
         (let ((hello-result
-                (call conn "hello" (obj "calls_you" caller-name
-                                        "generation" generation))))
+                (jval->hello-result
+                 (call conn "hello" (obj "calls_you" caller-name
+                                         "generation" generation)))))
           (setf (slot-value conn 'hello) hello-result)
           (values conn hello-result))
       (error (e)
@@ -196,6 +197,11 @@ the connection and the hello result object."
        (let ((s (conn-socket conn)))
          (and s (open-stream-p s)))
        (bt:thread-alive-p (conn-reader-thread conn))))
+
+(defun connection-hello (conn)
+  "The hello result instance negotiated when CONN was opened, or NIL if the
+handshake had not completed (e.g. the connection is in a transient state)."
+  (conn-hello conn))
 
 #+sbcl
 (sb-alien:define-alien-routine ("shutdown" %socket-shutdown) sb-alien:int
@@ -234,7 +240,14 @@ CONNECT cannot reuse it underneath a read that has not returned yet."
     (when (and thr
                (not (eq thr (bt:current-thread)))
                (bt:thread-alive-p thr))
-      (bt:join-thread thr)))
+      (bt:join-thread thr)
+      ;; bordeaux-threads' CCL BACKEND joins the lisp thread as its function
+      ;; returns, but the process is only marked not-alive a moment later, so
+      ;; THREAD-ALIVE-P can still be true right after JOIN-THREAD. Wait that
+      ;; finite window out so callers see a settled reader (and its fd is
+      ;; really free) by the time DISCONNECT returns.
+      (loop repeat 200 while (bt:thread-alive-p thr)
+            do (sleep 0.001))))
   (let ((s (conn-socket conn)))
     (when (and s (open-stream-p s))
       (ignore-errors (close s))))

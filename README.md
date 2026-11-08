@@ -12,9 +12,12 @@ wrapper.
   use CCL's native `:address-family :file` support, or SBCL's `sb-bsd-sockets`.
 - Dependencies (all from Quicklisp): `jsown`, `bordeaux-threads`,
   `cl-base64`, `alexandria`, `uiop`.
-- Results are **jsown objects**; please read up on the
-  [jsown](http://quickdocs.org/jsown/) conventions (objects are cons cells
-  whose `cdr` is a list of alternating keys and values).
+- Every RPC wrapper returns a **typed result**: an instance of the class for
+  the method's result schema (generated from `hc schema`), with one slot (and
+  accessor `CLASS-SLOT`) per JSON property. Nested objects are instances of
+  their own class, arrays of objects are lists of instances, and free-form
+  objects (`labels`, `records`) become alists. See
+  [Typed results](#typed-results).
 - The only external dependency on the daemon is the socket — the tests are
   otherwise self-contained.
 
@@ -38,17 +41,20 @@ the `hc:` prefix.
 (in-package :cl-herdr-client)
 
 (connect)                          ; default socket, does the hello handshake
-;; => <herdr-connection>, plus a second value: the hello result object
+;; => <herdr-connection>, plus a second value: the hello RESULT instance
 
 (let ((run (terminal-run conn :name "echo" :line "echo hi there")))
-  (format t "~a~%" (jval run "address")))       ; e.g. "t1x"
+  (format t "~a~%" (run-result-address run)))    ; e.g. "t1x"
 
-(terminal-wait conn :terminal "t1x" :timeout 10)
-(terminal-read conn "t1x" :lines 40)
+(wait-result-reason (terminal-wait conn :terminal "t1x" :timeout 10)) ; "exit"
+(read-result-text (terminal-read conn "t1x" :lines 40))
 (terminal-rm conn "t1x")
 
 (disconnect conn)
 ```
+
+`run-result` is the class for `terminal.run`'s result — the wrapper returned
+an *instance* of it, and `run-result-address` is its accessor.
 
 ---
 
@@ -60,7 +66,8 @@ the `hc:` prefix.
 
 - Opens the unix socket and performs the `hello` handshake. The default path
   is `$XDG_RUNTIME_DIR/herdr-core/default.sock` (override with `:path`).
-- `(connection-hello conn)` returns the hello result.
+- `(connection-hello conn)` returns the hello result instance — e.g.
+  `(hello-result-version (connection-hello conn))`.
 - `(disconnect conn)` closes the socket and fails any in-flight requests.
 - `(connected-p conn)` — is the socket open and its reader thread alive?
 - `default-socket-path` / `*default-socket-path*` — inspect or rebind.
@@ -120,8 +127,10 @@ Design notes:
   defaulting to NIL, and NIL-valued ones are omitted from the request.
 - Wire keys use underscores where Lisp uses dashes; the wrappers translate
   (e.g. `:no-notify` → `"no_notify"`, `:outlive-parent` → `"outlive_parent"`).
-- Return values are jsown objects. Optional `on` params let the daemon send a
-  notification on an event connection instead of a live reply.
+- Return values are **typed instances** of the schema classes (see
+  [Typed results](#typed-results)), not jsown objects. Optional `on` params let
+  the daemon send a notification on an event connection instead of a live
+  reply.
 - `*call-timeout*` defaults to 300 s (per-call `:timeout` overrides).
 
 ### Full API reference (`hc:`/`cl-herdr-client:`)
@@ -141,6 +150,48 @@ Design notes:
 
 `(method-info 'terminal-run)` returns the wire name plus required/optional arg
 lists for any of the above.
+
+---
+
+## Typed results
+
+Each schema in `hc schema` becomes a CLOS class (see `src/classes.lisp`),
+and every wrapper converts its reply into an instance (a collection of them
+for list results) before returning, so you never touch raw jsown for results.
+
+- **Class per schema**: `run-result`, `status-result`, `terminal`, `machine-view`,
+  `hello-result`, … one slot per JSON property. The converter is
+  `jval-><class>` (e.g. `(jval->run-result js)`) if you need it directly.
+- **Accessors**: `CLASS-SLOT`, with JSON keys lower-cased and `_` ↔ `-`
+  (`created_ms` → `run-result-created-ms`). A property whose plain accessor
+  would collide with an RPC wrapper or a `:use`d package's symbol gets a `-p`
+  suffix: `Terminal.rm`/`Terminal.keep` are `terminal-rm-p`/`terminal-keep-p`
+  (so the `terminal.rm`/`terminal.keep` wrappers keep their names), and
+  `machine.version` is `machine-version-p` (not `CL:MACHINE-VERSION`).
+- **Nested objects** are instances of their own class —
+  `(status-result-core st)` is a `core-info` instance with
+  `(core-info-id …)`/`(core-info-name …)`.
+- **Arrays of objects** are lists of instances —
+  `(machine-list-result-machines r)` is a list of `machine-view`.
+- **Free-form objects** (`labels`, `records`) are alists of `(key . value)`,
+  values converted per schema (e.g. `run-result-records` maps to `status`
+  instances).
+- **Missing keys and JSON `null`** both read as `NIL`. `doc.get`/`doc.set`
+  `value` is opaque (`:any`) and stays a jsown object — reach into it with
+  `jval`/`jval-safe`.
+
+```lisp
+(let ((st (server-status conn)))        ; a status-result instance
+  (core-info-name (status-result-core st)) ; "serve"
+  (status-result-pid st))
+
+(let ((lst (machine-list conn)))        ; a machine-list-result instance
+  (mapcar #'machine-view-name (machine-list-result-machines lst)))
+```
+
+If you ever do need the raw jsown result, keep the connection's last raw reply
+via `call`/`connect` internals, or build it back with `jto-json` — but the
+accessors above are the intended interface.
 
 ---
 
@@ -229,8 +280,11 @@ sbcl --noinform --disable-debugger --load ~/quicklisp/setup.lisp \
 ```
 
 Current suites: `json-object-builders`, `json-round-trip`, `base64`,
-`api-metadata`, `socket-reconnect-and-close` (30 reconnects, then a call on one connection
-after another is closed). Status: **90 checks, 100% pass** on CCL and SBCL.
+`api-metadata`, `socket-reconnect-and-close` (30 reconnects, then a call on
+one connection after another is closed), `typed-results` (converters,
+accessors, nested instances, lists/maps, NIL-for-null) and
+`wrapper-returns-typed-instance` (a wrapper + converter round-trip against a
+stubbed transport). Status: **141 checks, 100% pass** on CCL and SBCL.
 
 ## Demo
 
@@ -252,6 +306,7 @@ sbcl --noinform --disable-debugger --load demo.lisp --eval '(sb-ext:quit)'
 cl-herdr-client.asd        ASDF system + cl-herdr-client/tests test system
 src/packages.lisp       package + exports
 src/transport.lisp      socket, reader thread, JSON helpers, call/notify, conditions
+src/classes.lisp        schema classes (define-hc-schema) + jval->CLASS converters
 src/api.lisp            one wrapper per OpenRPC method (+ method-info)
 src/events.lisp         dedicated-connection event subscriptions
 tests/tests.lisp        FiveAM suite

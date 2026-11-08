@@ -31,7 +31,7 @@ the connection) is how you end the subscription."
                                              :labels labels)))
           (make-instance 'event-subscription
                          :connection conn
-                         :seq (jval-safe result "seq")))
+                         :seq (subscribe-result-seq result)))
       (error (e)
         (ignore-errors (disconnect conn))
         (error e)))))

@@ -33,6 +33,7 @@ native :address-family :file support, or SBCL's sb-bsd-sockets."
                 :serial t
                 :components ((:file "packages")
                              (:file "transport")
+                             (:file "classes")
                              (:file "api")
                              (:file "events"))))
   ;; test-op: `(asdf:test-system :cl-herdr-client)` runs the FiveAM suite.

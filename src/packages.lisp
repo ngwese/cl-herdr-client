@@ -8,11 +8,15 @@
   (:nicknames #:hc)
   (:documentation "Client for the herdr-core daemon (hc).
 
-Results of the RPC calls are jsown objects (http://quickdocs.org/jsown/),
-addressed with JSOWN:VAL / returned here as H:JVAL, and stringified with
-H:JTO-JSON. Function params that are JSON objects accept either a jsown
-object (built with H:OBJECT, H:OBJ, H:ALIST->JS or JSOWN:NEW-JS) or a plain
-alist (HS:ALIST->JS).")
+Every RPC wrapper returns a typed result: an instance of the class for the
+method's result schema (see `hc schema`), with one slot per property. Nested
+objects are instances of their own classes, arrays of objects are lists of
+instances, and objects such as `labels`/`records` become alists. Each class
+has accessors CLASS-SLOT; the underlying jsown object (from which instances
+are built by JVAL->CLASS) is still available via H:JVAL / H:JTO-JSON if you
+need it. Function params that are JSON objects accept either a jsown object
+(built with H:OBJECT, H:OBJ, H:ALIST->JS or JSOWN:NEW-JS) or a plain alist
+(H:ALIST->JS).")
 
   (:export
    ;; ---- jsown re-exports ----
@@ -96,4 +100,102 @@ alist (HS:ALIST->JS).")
    #:machine-connect
    #:machine-rename
    #:machine-rm
-   #:rpc-discover))
+   #:rpc-discover
+
+   ;; ---- schema classes: one per herdr-core result schema (class + its slots) ----
+   ;; Each class carries accessors CLASS-SLOT (e.g. TERMINAL-ADDRESS) and
+   ;; JVAL->CLASS builds an instance from a raw jsown object.
+   ;; hello-result + its slots
+   #:hello-result
+   #:jval->hello-result
+   ;; core-info + its slots
+   #:core-info
+   #:jval->core-info
+   ;; status-result + its slots
+   #:status-result
+   #:jval->status-result
+   ;; holder-info + its slots
+   #:holder-info
+   #:jval->holder-info
+   ;; stop-result + its slots
+   #:stop-result
+   #:jval->stop-result
+   ;; run-result + its slots
+   #:run-result
+   #:jval->run-result
+   ;; first-message + its slots
+   #:first-message
+   #:jval->first-message
+   ;; foreground + its slots
+   #:foreground
+   #:jval->foreground
+   ;; status + its slots
+   #:status
+   #:jval->status
+   ;; wait-result + its slots
+   #:wait-result
+   #:jval->wait-result
+   ;; templates-result + its slots
+   #:templates-result
+   #:jval->templates-result
+   ;; template-info + its slots
+   #:template-info
+   #:jval->template-info
+   ;; list-result + its slots
+   #:list-result
+   #:jval->list-result
+   ;; machine-view + its slots
+   #:machine-view
+   #:jval->machine-view
+   ;; terminal + its slots
+   #:terminal
+   #:jval->terminal
+   ;; remove-result + its slots
+   #:remove-result
+   #:jval->remove-result
+   ;; read-result + its slots
+   #:read-result
+   #:jval->read-result
+   ;; attach-result + its slots
+   #:attach-result
+   #:jval->attach-result
+   ;; send-result + its slots
+   #:send-result
+   #:jval->send-result
+   ;; keys-result + its slots
+   #:keys-result
+   #:jval->keys-result
+   ;; interrupt-result + its slots
+   #:interrupt-result
+   #:jval->interrupt-result
+   ;; put-result + its slots
+   #:put-result
+   #:jval->put-result
+   ;; exec-result + its slots
+   #:exec-result
+   #:jval->exec-result
+   ;; file-read-result + its slots
+   #:file-read-result
+   #:jval->file-read-result
+   ;; file-result + its slots
+   #:file-result
+   #:jval->file-result
+   ;; doc-get-result + its slots
+   #:doc-get-result
+   #:jval->doc-get-result
+   ;; doc-set-result + its slots
+   #:doc-set-result
+   #:jval->doc-set-result
+   ;; subscribe-result + its slots
+   #:subscribe-result
+   #:jval->subscribe-result
+   ;; machine + its slots
+   #:machine
+   #:jval->machine
+   ;; machine-list-result + its slots
+   #:machine-list-result
+   #:jval->machine-list-result
+   ;; rpc.discover returns an OpenRPC document (raw jsown), see rpc-discover-result
+   #:rpc-discover-result
+   #:jval->rpc-discover-result
+   #:rpc-discover-result-document))

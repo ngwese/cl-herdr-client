@@ -32,23 +32,25 @@
     (unwind-protect
          (progn
            (format t "~%[1] hello: core.name=~a version=~a~%"
-                   (jval (jval hello "core") "name")
-                   (jval hello "version"))
+                   (core-info-name (hello-result-core hello))
+                   (hello-result-version hello))
 
            (let ((st (server-status conn)))
              (format t "[2] server.status: version=~a pid=~a live=~a~%"
-                     (jval st "version") (jval st "pid") (jval st "live")))
+                     (status-result-version st)
+                     (status-result-pid st)
+                     (status-result-live st)))
 
            (format t "[3] terminal.run a background echo...~%")
            (let* ((run (terminal-run conn :name "demo-echo"
                                      :line "echo hello-from-cl-herdr-client; sleep 1"
                                      :no-notify t))
-                  (addr (jval run "address")))
+                  (addr (run-result-address run)))
              (format t "    started: ~a~%" addr)
              (format t "    terminal-wait reason: ~a~%"
-                     (jval (terminal-wait conn :terminal addr) "reason"))
+                     (wait-result-reason (terminal-wait conn :terminal addr)))
              (let ((r (terminal-read conn addr :lines 40)))
-               (format t "    read text: ~a~%" (or (jval r "text") "")))
+               (format t "    read text: ~a~%" (or (read-result-text r) "")))
              (terminal-rm conn addr))
 
            (format t "[4] error handling: get a bogus terminal...~%")
@@ -62,29 +64,30 @@
                   (payload "hello, cl-herdr-client!"))
              (file-write conn path (base64-encode payload))
              (let ((r (file-read conn path :limit 5)))
-               (format t "    wrote+read: ~a~%" (jval r "text"))))
+               (format t "    wrote+read: ~a~%" (file-read-result-text r))))
 
            (format t "[6] doc.get / doc.set (opaque JSON doc)...~%")
            (let ((before (doc-get conn "cl-herdr-client-demo-doc")))
              (format t "    before: version=~a value=~a~%"
-                     (jval before "version") (jval before "value"))
+                     (doc-get-result-version before)
+                     (doc-get-result-value before))
              (doc-set conn :name "cl-herdr-client-demo-doc"
                       :value (object "count" 1 "who" "cl-herdr-client")
-                      :version (jval before "version"))
+                      :version (doc-get-result-version before))
              (let ((after (doc-get conn "cl-herdr-client-demo-doc")))
                (format t "    after:  version=~a count=~a~%"
-                       (jval after "version")
-                       (jval (jval after "value") "count"))
+                       (doc-get-result-version after)
+                       (jval (doc-get-result-value after) "count"))
                ;; tidy up
                (doc-set conn :name "cl-herdr-client-demo-doc"
                         :value (object)
-                        :version (jval after "version"))))
+                        :version (doc-get-result-version after))))
 
            (format t "[7] events on a dedicated connection...~%")
-           (let* ((ev-addr (jval (terminal-run conn :name "demo-ev"
-                                              :line "true"
-                                              :no-notify t)
-                                "address"))
+           (let* ((ev-addr (run-result-address
+                            (terminal-run conn :name "demo-ev"
+                                          :line "true"
+                                          :no-notify t)))
                   (sub (subscribe :terminal ev-addr)))
              (format t "    subscribed, snapshot seq=~a (own connection)~%" (sub-seq sub))
              ;; grab whatever races in, up to ~2s
@@ -101,19 +104,22 @@
              (format t "    (subscription closed; terminal removed)~%"))
 
            (format t "[8] terminal.send into a cat, read it back, kill it...~%")
-           (let* ((addr (jval (terminal-run conn :name "demo-cat" :line "cat"
-                                            :no-notify t) "address")))
+           (let* ((addr (run-result-address
+                         (terminal-run conn :name "demo-cat" :line "cat"
+                                       :no-notify t))))
              (terminal-send conn addr "hi-from-client")
              ;; cat keeps running and never reports status, so a plain wait is
              ;; bounded by :timeout (a not-sent-by-us check-in, by design).
              (format t "    terminal-wait (2s) -> ~a~%"
-                     (jval (terminal-wait conn :terminal addr :timeout 2) "reason"))
+                     (wait-result-reason
+                      (terminal-wait conn :terminal addr :timeout 2)))
              (let ((r (terminal-read conn addr :lines 20)))
                (format t "    read text: ~a"
-                       (string-trim "\r\n " (or (jval r "text") ""))))
+                       (string-trim "\r\n " (or (read-result-text r) ""))))
              (terminal-kill conn addr)
              (format t "    terminal-wait after kill -> ~a~%"
-                     (jval (terminal-wait conn :terminal addr :timeout 10) "reason"))
+                     (wait-result-reason
+                      (terminal-wait conn :terminal addr :timeout 10)))
              (terminal-rm conn addr))
 
            (format t "~%demo done.~%"))
