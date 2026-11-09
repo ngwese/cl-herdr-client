@@ -1,119 +1,27 @@
 ;;;; SPDX-FileCopyrightText: 2026 Greg Wuller
 ;;;; SPDX-License-Identifier: MIT
 
-;;;; transport.lisp --- socket/named-pipe connection + JSON-RPC 2.0 core
+;;;; transport.lisp --- backend-agnostic connection + JSON-RPC 2.0 core
 ;;;;
-;;;; The herdr-core daemon speaks JSON-RPC 2.0, one message per line, over a
-;;;; unix-domain socket on unix systems and a named pipe on Windows. This file
-;;;; implements the connection (CCL's native :address-family sockets, SBCL's
-;;;; sb-bsd-sockets, or a raw Win32 WaitNamedPipe/CreateFile transport on
-;;;; Windows SBCL), a background reader thread that correlates responses to
-;;;; in-flight requests and parks asynchronous notifications (events, notes)
-;;;; in a thread-safe mailbox.
-
-#+(and sbcl (not win32))
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :sb-bsd-sockets))
-
+;;;; herdr-core speaks JSON-RPC 2.0, one message per line, over a unix-domain
+;;;; socket on unix and a named pipe on Windows.  Endpoint plumbing -- opening
+;;;; the stream (CONNECT-SOCKET), unblocking a polling reader
+;;;; (SHUTDOWN-INPUT), and pumping lines off the stream (READER-RUN) -- depends
+;;;; on the operating system and lives in transport-unix.lisp /
+;;;; transport-win32.lisp; exactly one of those is compiled
+;;;; (cl-herdr-client.asd).  This file holds what every backend shares: the
+;;;; JSON helpers, the conditions, the connection object, the mailbox, the
+;;;; reader-thread lifecycle, and the send / request-response machinery.
 
 (in-package #:cl-herdr-client)
 
-(defvar *pipe-open-timeout* 30
-  "Seconds to wait for the daemon's endpoint (named pipe on Windows, unix
-socket elsewhere) to accept a client before signalling
-HERDR-CONNECTION-ERROR.")
+;; ---- transport protocol --------------------------------------------------
+;; Implemented by transport-unix.lisp / transport-win32.lisp.  The ftype
+;; declarations let this file compile before its backend is loaded; without
+;; them SBCL warns that the functions are undefined at compile time.
 
-#+(and sbcl win32)
-(progn
-  ;; ---- Windows named-pipe transport (SBCL) -------------------------------
-  ;;
-  ;; herdr-core on Windows listens on a named pipe (`\\.\pipe\herdr-core-
-  ;; <user>-<session>.sock`) rather than a unix-domain socket. SBCL's file
-  ;; layer cannot open `\\.\pipe\...` (it comes back with ERROR_PIPE_BUSY),
-  ;; so we open the pipe with CreateFileW ourselves and wrap the resulting
-  ;; Win32 handle as an fd-stream -- read-line / write-string / finish-output
-  ;; then behave like any other stream.
-
-  (defparameter +win32-generic-read+  #x80000000)
-  (defparameter +win32-generic-write+ #x40000000)
-  (defparameter +win32-open-existing+ 3)
-  (defparameter +win32-invalid-handle+ #xFFFFFFFF)
-
-  (sb-alien:define-alien-routine ("WaitNamedPipeW" %wait-named-pipe) sb-alien:int
-    (name (sb-alien:* sb-alien:unsigned-char))
-    (timeout sb-alien:unsigned-long))
-  (sb-alien:define-alien-routine ("CreateFileW" %create-file-w) sb-alien:unsigned-long
-    (name (sb-alien:* sb-alien:unsigned-char))
-    (access sb-alien:unsigned-long)
-    (share sb-alien:unsigned-long)
-    (secattr sb-alien:unsigned-long)
-    (disp sb-alien:unsigned-long)
-    (flags sb-alien:unsigned-long)
-    (tmpl sb-alien:unsigned-long))
-  (sb-alien:define-alien-routine ("CloseHandle" %close-handle) sb-alien:int
-    (handle sb-alien:unsigned-long))
-
-  (defun win32-wchar-buffer (string)
-    "A NUL-terminated UTF-16LE copy of STRING, as an alien octet buffer."
-    (let* ((bytes (sb-ext:string-to-octets string :external-format :utf-16le))
-           (buf (sb-alien:make-alien sb-alien:unsigned-char (1+ (length bytes)))))
-      (loop for b across bytes for i from 0
-            do (setf (sb-alien:deref buf i) b))
-      (setf (sb-alien:deref buf (length bytes)) 0)
-      buf))
-
-  (defmacro with-win32-wchar ((ptr string) &body body)
-    `(let* ((?buf (win32-wchar-buffer ,string))
-            (,ptr (sb-alien:cast ?buf (sb-alien:* sb-alien:unsigned-char))))
-       (unwind-protect (progn ,@body)
-         (sb-alien:free-alien ?buf))))
-
-  (defparameter +win32-pipe-prefix+
-    ;; the device namespace prefix `\\.\\pipe\\` as a native string
-    (coerce (list #\\ #\\ #\. #\\ #\p #\i #\p #\e #\\) 'string))
-
-  (defun win32-device-path (path)
-    "PATH may be a bare pipe name (herdr-core-g1988-default.sock) or a full
-\\.\\pipe\\ name; always return the device path CreateFileW expects."
-    (if (and (>= (length path) (length +win32-pipe-prefix+))
-             (string-equal path +win32-pipe-prefix+
-                           :end1 (length +win32-pipe-prefix+)))
-        path
-        (concatenate 'string +win32-pipe-prefix+ path)))
-
-  (defun win32-open-named-pipe (path &optional (timeout *pipe-open-timeout*))
-    "Open the named pipe PATH (bare name or device path) and return a
-bidirectional character stream over it. Waits up to TIMEOUT seconds for the
-daemon's pipe to accept a client. Signals HERDR-CONNECTION-ERROR if it never
-does (i.e. the daemon is not running)."
-    (let ((device (win32-device-path path)))
-      (with-win32-wchar (wpath device)
-        (let ((deadline (+ (get-internal-real-time)
-                           (round (* timeout internal-time-units-per-second)))))
-          (loop
-            ;; Give a moment for an instance to be free, then try to connect.
-            (%wait-named-pipe wpath 200)
-            (let ((h (%create-file-w wpath
-                                     (logior +win32-generic-read+
-                                             +win32-generic-write+)
-                                     3 0
-                                     +win32-open-existing+ 0 0)))
-              (cond ((not (or (= h 0) (= h +win32-invalid-handle+)))
-                     (return
-                       (sb-sys:make-fd-stream h
-                                              :input t
-                                              :output t
-                                              :element-type 'character
-                                              :external-format :utf-8
-                                              :buffering :full)))
-                    ((>= (get-internal-real-time) deadline)
-                     (return
-                       (error 'herdr-connection-error
-                              :message
-                              (format nil
-                                      "cannot connect to herdr-core named pipe ~a (is the daemon running?)"
-                                      device))))))))))))
-
+(declaim (ftype (function (t) t) connect-socket shutdown-input))
+(declaim (ftype (function (t t) t) reader-run))
 
 ;;; ---------------------------------------------------------------------------
 ;;; JSON helpers (runtime, since jsown:new-js / jsown:extend-js are macros)
@@ -143,7 +51,7 @@ does (i.e. the daemon is not running)."
 (defun object (&rest key-values)
   "Build a jsown JSON object, keeping every key. NIL values become JSON null
 (jsown represents null as the keyword :NULL; a raw NIL would otherwise be
-aerialized as an empty array). Contrast with OBJ, which drops NIL keys."
+serialized as an empty array). Contrast with OBJ, which drops NIL keys."
   (let ((js (jsown:empty-object)))
     (loop for (k v) on key-values by #'cddr
           do (setf (jsown:val js k) (if (null v) :null v)))
@@ -204,31 +112,13 @@ and terminal.put."
 (define-condition herdr-timeout (herdr-error) ())
 
 ;;; ---------------------------------------------------------------------------
-;;; Socket path discovery
+;;; Endpoint path discovery
 ;;; ---------------------------------------------------------------------------
 
-#+win32
-(defun windows-default-pipe ()
-  "The named pipe herdr-core listens on for this user's `default` session:
-\\.\pipe\herdr-core-<USER>-default.sock."
-  (let ((user (or (uiop:getenv "USERNAME")
-                  ;; fall back to the basename of %USERPROFILE%
-                  (let ((home (uiop:getenv "USERPROFILE")))
-                    (and home (file-namestring (uiop:parse-native-namestring home))))
-                  "user")))
-    (format nil "herdr-core-~a-default.sock" user)))
-
-(defvar *default-socket-path*
-  #-win32
-  (or (let ((xdg (uiop:getenv "XDG_RUNTIME_DIR")))
-        (when (and xdg (plusp (length xdg)))
-          (namestring (merge-pathnames "herdr-core/default.sock"
-                                       (uiop:ensure-directory-pathname xdg)))))
-      "/run/user/1000/herdr-core/default.sock")
-  #+win32
-  (windows-default-pipe)
+(defvar *default-socket-path* nil
   "Default location of the herdr-core endpoint: a unix socket path on unix,
-the named pipe name on Windows. Override with CONNECT :PATH.")
+the named pipe name on Windows.  The transport backend (transport-unix.lisp /
+transport-win32.lisp) fills this in as it loads; override with CONNECT :PATH.")
 
 (defun default-socket-path ()
   "The default endpoint, from *DEFAULT-SOCKET-PATH*."
@@ -259,30 +149,6 @@ the named pipe name on Windows. Override with CONNECT :PATH.")
    (next-id    :reader conn-next-id :initform 0)
    (closed     :reader conn-closed :initform nil)
    (hello      :reader conn-hello :initform nil)))
-
-(defun connect-socket (path)
-  "Open a bidirectional character stream to the herdr-core endpoint.
-Clozure uses native AF_UNIX sockets; SBCL on unix uses sb-bsd-sockets; and
-SBCL on Windows opens the daemon's named pipe (PATH may be a bare pipe name
-or a full \\.\\.pipe\\... device path)."
-  #+ccl
-  (ccl:make-socket :address-family :file :remote-filename (namestring path))
-  #+(and sbcl (not win32))
-  (let ((socket (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
-    (sb-bsd-sockets:socket-connect socket (namestring path))
-    (sb-bsd-sockets:socket-make-stream socket
-                                       :input t
-                                       :output t
-                                       :element-type 'character
-                                       :external-format :utf-8
-                                       :buffering :full
-                                       :auto-close t))
-  #+(and sbcl win32)
-  (win32-open-named-pipe (namestring path) *pipe-open-timeout*)
-  #-(or ccl (and sbcl (not win32)) (and sbcl win32))
-  (error 'herdr-connection-error
-         :message (format nil "cl-herdr-client: unix-domain sockets / named pipes need Clozure CL or SBCL; got ~a"
-                          (lisp-implementation-type))))
 
 (defun connect (&key (path (default-socket-path))
                 caller-name (generation 1))
@@ -323,32 +189,6 @@ the connection and the hello result object."
 handshake had not completed (e.g. the connection is in a transient state)."
   (conn-hello conn))
 
-#+(and sbcl (not win32))
-(sb-alien:define-alien-routine ("shutdown" %socket-shutdown) sb-alien:int
-  (fd sb-alien:int)
-  (how sb-alien:int))
-
-(defun shutdown-input (stream)
-  (declare #+(and sbcl win32) (ignore stream))
-  "Make a blocked READ-LINE return without releasing the descriptor.
-Closing the fd while the reader is still inside READ-LINE lets the kernel
-hand that number to the next CONNECT. On Clozure the old stream keeps the
-number and reads the new connection's bytes, so the reply never reaches the
-waiter. Shutting down the read side unblocks the reader and leaves the fd
-allocated until that thread has left the socket.
-On Windows the reader never blocks in READ-LINE (it polls), so there is
-nothing to shut down -- DISCONNECT's stop flag is seen within a poll interval."
-  #+ccl
-  (ignore-errors (ccl:shutdown stream :direction :input))
-  #+(and sbcl (not win32))
-  (let ((fd (sb-sys:fd-stream-fd stream)))
-    (when (and (integerp fd) (>= fd 0))
-      ;; 0 is SHUT_RD on Linux: further reads return EOF, the fd stays open.
-      (%socket-shutdown fd 0)))
-  #+(and sbcl win32)
-  nil
-  nil)
-
 (defun wake-mailbox (conn)
   (bt:with-lock-held ((conn-mb-lock conn))
     (bt:condition-notify (conn-mb-cond conn))))
@@ -366,7 +206,7 @@ CONNECT cannot reuse it underneath a read that has not returned yet."
                (not (eq thr (bt:current-thread)))
                (bt:thread-alive-p thr))
       (bt:join-thread thr)
-      ;; bordeaux-threads' CCL BACKEND joins the lisp thread as its function
+      ;; bordeaux-threads' CCL backend joins the lisp thread as its function
       ;; returns, but the process is only marked not-alive a moment later, so
       ;; THREAD-ALIVE-P can still be true right after JOIN-THREAD. Wait that
       ;; finite window out so callers see a settled reader (and its fd is
@@ -439,47 +279,6 @@ CONNECT cannot reuse it underneath a read that has not returned yet."
       (when (and s (open-stream-p s))
         (ignore-errors (close s))))))
 
-;;; unix-like builds: block in READ-LINE; SHUTDOWN-INPUT makes it return EOF.
-#-win32
-(defun reader-run (conn s)
-  (loop
-    (let ((line (handler-case (read-line s nil nil)
-                  (error () :eof))))
-      (cond
-        ((or (eq line :eof) (null line)) (return))
-        (t (process-line-ignoring-errors conn line))))))
-
-;;; Windows: a blocking READ-LINE over the named pipe handle cannot be
-;;; interrupted (neither CancelIoEx nor CloseHandle unblocks it -- CloseHandle
-;;; on a handle with a pending synchronous read in another thread deadlocks),
-;;; so the reader polls the stream with a short sleep instead. It never blocks
-;;; in READ-LINE: LISTEN says a character is ready / read-char reads one, and
-;;; the loop returns to the poll (and the stop flag) between characters.
-(defvar *reader-poll-seconds* 0.005
-  "Windows only: seconds between named-pipe polls while no data is waiting.")
-
-#+win32
-(defun reader-run (conn s)
-  (let ((line (make-array 128 :element-type 'character
-                          :fill-pointer 0 :adjustable t)))
-    (loop
-      (when (slot-value conn 'closed)
-        (return))
-      (if (and (open-stream-p s) (listen s))
-          (let ((ch (read-char s nil :eof)))
-            (cond
-              ((or (eq ch :eof) (null ch)) (return))
-              ((char= ch #\Newline)
-               ;; NB: COERCE to STRING of an adjustable fill-pointered array
-               ;; returns an alias (same object) on SBCL, so we must use
-               ;; SUBSEQ to get a real copy: resetting the fill pointer below
-               ;; would otherwise zero out the line we just parsed.
-               (let ((done (subseq line 0 (fill-pointer line))))
-                 (setf (fill-pointer line) 0)
-                 (process-line-ignoring-errors conn done)))
-              (t (vector-push-extend ch line))))
-          (sleep *reader-poll-seconds*)))))
-
 (defun process-line-ignoring-errors (conn line)
   (handler-case (process-line conn line)
     (error (e)
@@ -529,6 +328,8 @@ HT:OBJ / HT:ALIST->JS, or NIL for none). Blocks for the response and returns
 the `result` object. Signals HERDR-RPC-ERROR on an error response and
 HERDR-TIMEOUT / HERDR-CONNECTION-ERROR on failure."
   (declare #+sbcl (sb-ext:muffle-conditions style-warning))
+  ;; NB: SBCL alone warns about mixing &OPTIONAL and &KEY in one lambda list;
+  ;; the combination is intentional and harmless elsewhere.
   (let* ((id (next-request-id conn))
          (pend (make-pending))
          (req (object "jsonrpc" "2.0"

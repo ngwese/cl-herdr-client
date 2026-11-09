@@ -23,7 +23,10 @@ The only implementation-specific piece is the transport itself: Clozure CL's
 native :address-family :file unix sockets, SBCL's sb-bsd-sockets (unix only),
 or -- on Windows SBCL, where unix sockets don't exist -- a raw Win32
 named-pipe transport (WaitNamedPipe/CreateFile) that follows the same
-one-JSON-message-per-line protocol over the matching \\\\.\\pipe\\ endpoint."
+one-JSON-message-per-line protocol over the matching \\\\.\\pipe\\ endpoint.
+The backend lives in src/transport-unix.lisp / src/transport-win32.lisp
+(exactly one is compiled, gated on the host platform); src/transport.lisp
+holds the backend-agnostic core."
   :author "Greg Wuller"
   :license "MIT"
   :version "0.1.0"
@@ -36,6 +39,12 @@ one-JSON-message-per-line protocol over the matching \\\\.\\pipe\\ endpoint."
                 :serial t
                 :components ((:file "packages")
                              (:file "transport")
+                             ;; platform backend: exactly one compiles, and
+                             ;; the other is dropped from the build.
+                             (:file "transport-unix"
+                                    :if-feature (:not :win32))
+                             (:file "transport-win32"
+                                    :if-feature (:and :sbcl :win32))
                              (:file "classes")
                              (:file "api")
                              (:file "events"))))
