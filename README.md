@@ -44,19 +44,19 @@ the `hc:` prefix.
 ## Quick start
 
 ```lisp
-(in-package :cl-herdr-client)
+(use-package :cl-herdr-client)
 
-(connect)                          ; default socket, does the hello handshake
+(setq conn (hc:connect))                            ; default socket, does the hello handshake
 ;; => <herdr-connection>, plus a second value: the hello RESULT instance
 
-(let ((run (terminal-run conn :name "echo" :line "echo hi there")))
-  (format t "~a~%" (run-result-address run)))    ; e.g. "t1x"
+(let ((run (hc:terminal-run conn :name "echo" :line "echo hi there")))
+  (format t "~a~%" (hc:run-result-address run)))    ; e.g. "t1x"
 
-(wait-result-reason (terminal-wait conn :terminal "t1x" :timeout 10)) ; "exit"
-(read-result-text (terminal-read conn "t1x" :lines 40))
-(terminal-rm conn "t1x")
+(hc:wait-result-reason (hc:terminal-wait conn :terminal "t1x" :timeout 10)) ; "exit"
+(hc:read-result-text (hc:terminal-read conn "t1x" :lines 40))
+(hc:terminal-rm conn "t1x")
 
-(disconnect conn)
+(hc:disconnect conn)
 ```
 
 `run-result` is the class for `terminal.run`'s result — the wrapper returned
