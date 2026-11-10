@@ -11,18 +11,23 @@
 ;;;;       sbcl --noinform --disable-debugger --load demo.lisp
 ;;;;            --eval '(sb-ext:quit)'
 ;;;; (loads cl-herdr-client from the directory this file lives in, and Quicklisp
-;;;; from ~/quicklisp/setup.lisp when it is not already loaded)
+;;;; from ~/quicklisp/setup.lisp when it is not already loaded; ql:quickload
+;;;; installs any missing Quicklisp dependencies)
 
 (require :asdf)
+
 #-quicklisp
 (let ((setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
-  (when (probe-file setup)
-    (load setup)))
+  (unless (probe-file setup)
+    (error "Quicklisp not found at ~a" setup))
+  (load setup))
+
 (defvar *here*
   (make-pathname :defaults (or *load-truename* *default-pathname-defaults*)
                  :name nil :type nil))
 (push *here* asdf:*central-registry*)
-(asdf:load-system :cl-herdr-client)
+
+(ql:quickload :cl-herdr-client)
 
 (defpackage #:herdr-demo (:use #:cl #:cl-herdr-client))
 (in-package #:herdr-demo)
