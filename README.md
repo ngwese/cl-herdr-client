@@ -65,7 +65,11 @@ an *instance* of it, and `run-result-address` is its accessor.
 ```
 
 - Opens the unix socket and performs the `hello` handshake. The default path
-  is `$XDG_RUNTIME_DIR/herdr-core/default.sock` (override with `:path`).
+  follows herdr-core: `HC_SOCKET` if set, else
+  `$XDG_RUNTIME_DIR/herdr-core/<session>.sock` (or `/run/user/<uid>/...` when
+  that runtime dir exists), else
+  `~/.local/state/herdr-core/<session>/<session>.sock` (the usual macOS
+  fallback). Session is `HC_SESSION` or `default`. Override with `:path`.
 - `(connection-hello conn)` returns the hello result instance — e.g.
   `(hello-result-version (connection-hello conn))`.
 - `(disconnect conn)` closes the socket and fails any in-flight requests.
