@@ -8,8 +8,6 @@ JSON message per line, over a **unix-domain socket**. The method set is
 discovered from `hc schema` and each method gets a thin, ergonomic Lisp
 wrapper.
 
-- Targets: **Clozure Common Lisp** (CCL) and **SBCL**. Unix-domain sockets
-  use CCL's native `:address-family :file` support, or SBCL's `sb-bsd-sockets`.
 - Dependencies (all from Quicklisp): `jsown`, `bordeaux-threads`,
   `cl-base64`, `alexandria`, `uiop`.
 - Every RPC wrapper returns a **typed result**: an instance of the class for
@@ -20,6 +18,14 @@ wrapper.
   [Typed results](#typed-results).
 - The only external dependency on the daemon is the socket — the tests are
   otherwise self-contained.
+
+## Supports environments
+
+| OS | SBCL | CCL |
+| --- | --- | --- |
+| Linux | yes | yes |
+| macOS | yes | yes |
+| Windows | yes | — |
 
 ---
 
